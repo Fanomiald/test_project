@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard de Tracking</title>
+    <!-- CSS de Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+        th { background-color: #f2f2f2; }
+        button { padding: 10px; background-color: #007BFF; color: white; border: none; cursor: pointer; }
+        #map { height: 300px; margin-bottom: 20px; }
+        #chartContainer { width: 100%; height: 300px; }
+        .system-info { font-size: 0.9em; line-height: 1.4em; }
+        .system-info strong { display: inline-block; width: 120px; }
+    </style>
+</head>
+<body>
+    <h1>Dashboard de Tracking</h1>
+
+    <!-- Formulaire de recherche et filtrage -->
+    <h2>Recherche et filtrage</h2>
+    <form id="filterForm">
+        <label>Nom du PC: <input type="text" id="searchName" placeholder="Rechercher par nom"></label>
+        <label>État (En ligne/Non): 
+            <select id="statusFilter">
+                <option value="">Tous</option>
+                <option value="online">En ligne</option>
+                <option value="offline">Hors ligne</option>
+            </select>
+        </label>
+        <button type="button" onclick="applyFilter()">Filtrer</button>
+    </form>
+
+    <!-- Liste des PCs suivis -->
+    <h2>PC Suivis</h2>
+    <table id="pcsTable">
+        <thead>
+            <tr>
+                <th>Nom</th>
+                <th>IP</th>
+                <th>Dernière mise à jour</th>
+                <th>Statut</th>
+                <th>Infos Système</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for pc in pcs %}
+            {% set sys_info = {} %}
+            {% if pc[2] %}
+                {# On tente de parser le JSON de system_info #}
+                {% set sys_info = pc[2]|fromjson %}
+            {% endif %}
+            <tr>
+                <td class="pc-name">{{ pc[0] }}</td>
+                <td>{{ pc[1] }}</td>
+                <td>{{ pc[3] }}</td>
+                <td>
+                    {% if pc[3] %}
+                        <!-- Un PC est considéré en ligne si la dernière mise à jour date de moins de 2 minutes -->
+                        <span class="status" data-update="{{ pc[3] }}">Vérification...</span>
+                    {% else %}
+                        Inconnu
+                    {% endif %}
+                </td>
+                <td class="system-info">
+                    {% if sys_info %}
+                        <strong>Système :</strong> {{ sys_info.os }} {{ sys_info.os_release }}<br>
+                        <strong>CPU :</strong> {{ sys_info.cpu_model }}<br>
+                        <strong>Cœurs :</strong> {{ sys_info.cpu_cores }}<br>
+                        <strong>Utilisation CPU :</strong> {{ sys_info.cpu_usage_percent }} %<br>
+                        {% if sys_info.memory %}
+                        <strong>Mémoire :</strong>
+                            {% set used_mem = (sys_info.memory.used/1024/1024)|round(2) %}
+                            {% set total_mem = (sys_info.memory.total/1024/1024)|round(2) %}
+                            {{ used_mem }} MB / {{ total_mem }} MB<br>
+                        {% endif %}
+                        {% if sys_info.disk %}
+                        <strong>Disque :</strong>
+                            {% set used_disk = (sys_info.disk.used/1024/1024/1024)|round(2) %}
+                            {% set total_disk = (sys_info.disk.total/1024/1024/1024)|round(2) %}
+                            {{ used_disk }} Go / {{ total_disk }} Go
+                        {% endif %}
+                    {% else %}
+                        Aucune info
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Formulaire d'envoi de commande -->
+    <h2>Envoyer une Commande</h2>
+    <form action="/set_command" method="post">
+        <label>Nom du PC:</label>
+        <input type="text" name="computer_name" required>
+        <label>Type de commande:</label>
+        <select name="command_type" id="commandType">
+            <option value="shell">Commande Shell</option>
+            <option value="script">Script Python</option>
+            <option value="file_upload">Transfert de Fichier</option>
+        </select>
+        <label>Commande/Script/Chemin du fichier:</label>
+        <textarea name="command" rows="4" required></textarea>
+        <button type="submit">Envoyer</button>
+    </form>
+
+    <!-- Carte interactive -->
+    <h2>Carte des Clients</h2>
+    <div id="map"></div>
+
+    <!-- Graphique de l'historique -->
+    <h2>Historique des Mises à Jour</h2>
+    <label>Sélectionner le PC: 
+        <select id="pcSelect" onchange="loadHistoricalData()">
+            <option value="">-- Sélectionner --</option>
+            {% for pc in pcs %}
+            <option value="{{ pc[0] }}">{{ pc[0] }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <div id="chartContainer">
+        <canvas id="historyChart"></canvas>
+    </div>
+
+    <!-- Affichage des logs -->
+    <h2>Logs</h2>
+    <pre>
+        {% for log in logs %}
+        {{ log }}
+        {% endfor %}
+    </pre>
+    <form action="/clear_logs" method="post">
+        <button type="submit">Vider les Logs</button>
+    </form>
+
+    <!-- Inclusion des scripts JavaScript -->
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        // Mise à jour de l'état en ligne/hors ligne
+        function updateOnlineStatus() {
+            const now = new Date();
+            document.querySelectorAll(".status").forEach(function(span) {
+                const updateTime = new Date(span.getAttribute("data-update"));
+                const diffSeconds = (now - updateTime) / 1000;
+                span.textContent = (diffSeconds < 120) ? "En ligne" : "Hors ligne";
+            });
+        }
+        setInterval(updateOnlineStatus, 60000);
+        updateOnlineStatus();
+
+        // Filtrage du tableau
+        function applyFilter() {
+            const searchName = document.getElementById("searchName").value.toLowerCase();
+            const statusFilter = document.getElementById("statusFilter").value;
+            const rows = document.querySelectorAll("#pcsTable tbody tr");
+            rows.forEach(function(row) {
+                const name = row.querySelector(".pc-name").textContent.toLowerCase();
+                const status = row.querySelector(".status").textContent.toLowerCase();
+                let show = true;
+                if (searchName && !name.includes(searchName)) {
+                    show = false;
+                }
+                if (statusFilter) {
+                    if (statusFilter === "online" && status !== "en ligne") show = false;
+                    if (statusFilter === "offline" && status !== "hors ligne") show = false;
+                }
+                row.style.display = show ? "" : "none";
+            });
+        }
+
+        // Initialisation de la carte Leaflet
+        var map = L.map('map').setView([48.8566, 2.3522], 4); // Centré sur Paris
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+        // Ajout de marqueurs pour chaque PC avec coordonnées GPS
+        {% for pc in pcs %}
+            {% if pc[4] and pc[5] %}
+                L.marker([{{ pc[4] }}, {{ pc[5] }}]).addTo(map)
+                .bindPopup("{{ pc[0] }}");
+            {% endif %}
+        {% endfor %}
+
+        // Chargement de l'historique pour le PC sélectionné et affichage du graphique
+        var historyChart;
+        function loadHistoricalData() {
+            const pcName = document.getElementById("pcSelect").value;
+            if (!pcName) return;
+            fetch(`/historical/${pcName}`)
+                .then(response => response.json())
+                .then(data => {
+                    const labels = data.map(item => item.timestamp);
+                    const cpuData = data.map(item => item.system_info.cpu_usage_percent || 0);
+                    const ctx = document.getElementById('historyChart').getContext('2d');
+                    if(historyChart) {
+                        historyChart.destroy();
+                    }
+                    historyChart = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: labels,
+                            datasets: [{
+                                label: 'Utilisation CPU (%)',
+                                data: cpuData,
+                                borderColor: 'rgba(75, 192, 192, 1)',
+                                fill: false
+                            }]
+                        },
+                        options: {
+                            scales: {
+                                x: { display: true, title: { display: true, text: 'Temps' } },
+                                y: { display: true, title: { display: true, text: 'CPU (%)' }, suggestedMin: 0, suggestedMax: 100 }
+                            }
+                        }
+                    });
+                });
+        }
+    </script>
+</body>
+</html>
